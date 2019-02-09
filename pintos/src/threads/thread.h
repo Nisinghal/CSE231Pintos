@@ -152,7 +152,6 @@ int thread_get_load_avg (void);
 bool sleep_time_order(const struct list_elem *e1, const struct list_elem *e2, void *aux UNUSED);
 bool priority_ordering(const struct list_elem *e1, const struct list_elem *e2, void *aux UNUSED);
 
-void wakeup_sleeping_threads(struct list *timer_blocked_list);
 void recalculate_priority(void);
 void donate_priority(struct thread *th);
 
