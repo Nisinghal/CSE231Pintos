@@ -89,20 +89,21 @@ struct thread
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
-    int original_priority;
+    int original_priority;              /* Original priority of the thread */
     struct list_elem allelem;           /* List element for all threads list. */
 
-    int64_t sleep_time;
-    struct list_elem sleep_elem;
+    int64_t sleep_time;                 /* Time at which thread is supposed to wake up. */ 
+    struct list_elem sleep_elem;        /* List element for timer_blocked_list. */
 
     int nice_value;
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
-
-    struct lock *waiting_for_lock;
-    struct list waiting_threads;
-    struct list_elem wait_for_lock_elem;
+    
+    /* Members for implementing priority scheduler. */
+    struct lock *waiting_for_lock;      /* The lock which the thread is waiting to be released*/
+    struct list waiting_threads;        /* List of all threads that are waiting for the thread to release the lock which it is currently holding*/
+    struct list_elem wait_for_lock_elem; /* List element for waiting_threads */
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
