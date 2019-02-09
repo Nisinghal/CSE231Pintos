@@ -1,4 +1,5 @@
 #include "threads/thread.h"
+#include "devices/timer.h"
 #include <debug.h>
 #include <stddef.h>
 #include <random.h>
@@ -38,6 +39,7 @@ static struct thread *initial_thread;
 /* Lock used by allocate_tid(). */
 static struct lock tid_lock;
 
+
 /* Stack frame for kernel_thread(). */
 struct kernel_thread_frame 
   {
@@ -72,6 +74,9 @@ static void schedule (void);
 void thread_schedule_tail (struct thread *prev);
 static tid_t allocate_tid (void);
 
+static bool yield_required(struct thread *th);
+
+
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -93,7 +98,6 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
-
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
@@ -110,10 +114,9 @@ thread_start (void)
   struct semaphore idle_started;
   sema_init (&idle_started, 0);
   thread_create ("idle", PRI_MIN, idle, &idle_started);
-
+ 
   /* Start preemptive thread scheduling. */
   intr_enable ();
-
   /* Wait for the idle thread to initialize idle_thread. */
   sema_down (&idle_started);
 }
@@ -138,6 +141,18 @@ thread_tick (void)
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
+
+  if(thread_mlfqs && timer_ticks()%(TIMER_FREQ*2)==0){
+    struct thread *th;
+    list_sort(&ready_list,priority_ordering,NULL);
+    if(!list_empty(&ready_list)){
+      th=list_entry(list_front(&ready_list),struct thread,elem);
+      if(th->priority>t->priority){
+        intr_yield_on_return();
+      }
+    }
+  }
+
 }
 
 /* Prints thread statistics. */
@@ -184,6 +199,8 @@ thread_create (const char *name, int priority,
   init_thread (t, name, priority);
   tid = t->tid = allocate_tid ();
 
+  enum intr_level old_level= intr_disable ();
+
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame (t, sizeof *kf);
   kf->eip = NULL;
@@ -198,10 +215,13 @@ thread_create (const char *name, int priority,
   sf = alloc_frame (t, sizeof *sf);
   sf->eip = switch_entry;
   sf->ebp = 0;
-
+  intr_set_level (old_level);
   /* Add to run queue. */
   thread_unblock (t);
-
+  if(thread_current()->priority<t->priority){
+    ASSERT(!intr_context());
+    thread_yield();
+  }
   return tid;
 }
 
@@ -238,7 +258,7 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered(&ready_list,&t->elem,priority_ordering,NULL);
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -308,8 +328,9 @@ thread_yield (void)
   ASSERT (!intr_context ());
 
   old_level = intr_disable ();
-  if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+  if (cur != idle_thread) {
+    list_insert_ordered(&ready_list,&cur->elem,priority_ordering,NULL);
+  }
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -336,7 +357,21 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  struct thread *cur=thread_current();
+  cur->original_priority = new_priority;
+  int pr=cur->priority;
+
+  enum intr_level old_level = intr_disable ();
+ 
+  recalculate_priority();
+
+  if(yield_required(cur)){
+    thread_yield();
+  }
+  if(cur->priority>pr){
+    donate_priority(cur);
+  }
+  intr_set_level(old_level);
 }
 
 /* Returns the current thread's priority. */
@@ -350,15 +385,14 @@ thread_get_priority (void)
 void
 thread_set_nice (int nice UNUSED) 
 {
-  /* Not yet implemented. */
+  
 }
 
 /* Returns the current thread's nice value. */
 int
 thread_get_nice (void) 
 {
-  /* Not yet implemented. */
-  return 0;
+ return thread_current()->nice_value;
 }
 
 /* Returns 100 times the system load average. */
@@ -463,7 +497,17 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->original_priority = priority;
   t->magic = THREAD_MAGIC;
+
+  t->nice_value=0;
+
+  list_init(&t->waiting_threads);
+
+  if(thread_mlfqs && t!=initial_thread){
+    struct thread *curr=thread_current();
+    t->nice_value=curr->nice_value;
+  }
 
   old_level = intr_disable ();
   list_push_back (&all_list, &t->allelem);
@@ -580,6 +624,90 @@ allocate_tid (void)
   return tid;
 }
 
+
+static bool yield_required(struct thread *th){
+  struct thread *t;
+  enum intr_level old_level = intr_disable ();
+  if (!list_empty (&ready_list)){
+    struct list_elem *el=list_front (&ready_list);
+    t=list_entry (el, struct thread, elem);
+    if(t->priority>th->priority){
+      intr_set_level(old_level);
+      return true;
+    }
+  }
+  intr_set_level(old_level);
+  return false;
+}
+
+bool sleep_time_order(const struct list_elem *e1, const struct list_elem *e2, void *aux UNUSED){
+  struct thread *t1=list_entry(e1, struct thread, sleep_elem);
+  struct thread *t2=list_entry(e2, struct thread, sleep_elem);
+  int64_t sleep_time_t1=t1->sleep_time;
+  int64_t sleep_time_t2=t2->sleep_time;
+  if(sleep_time_t1<sleep_time_t2){
+    return 1;
+  }
+  if(sleep_time_t1==sleep_time_t2){
+    if(t1->priority>t2->priority){
+       return 1;
+    }else{
+       return 0;
+    }
+  }
+  return 0;
+}
+
+bool priority_ordering(const struct list_elem *e1, const struct list_elem *e2, void *aux UNUSED){
+  struct thread *t1=list_entry(e1, struct thread, elem);
+  struct thread *t2=list_entry(e2, struct thread, elem);
+  if(t1->priority>t2->priority){
+    return 1;
+  }else{
+    return 0;
+  }
+}
+
+void wakeup_sleeping_threads(struct list *timer_blocked_list){
+  int64_t ticks=timer_ticks();
+  while(!list_empty(timer_blocked_list)){
+    struct list_elem *el=list_front(timer_blocked_list);
+    struct thread *thr=list_entry(el,struct thread,sleep_elem);
+    int64_t sleep_time=thr->sleep_time;
+    if(sleep_time>ticks){
+      break;
+    }else{
+      list_pop_front(timer_blocked_list);
+      thread_unblock(thr);
+    }
+  }
+}
+
+void recalculate_priority(void){
+  struct thread *cur=thread_current();
+  int pr=cur->original_priority;
+  if(!list_empty(&cur->waiting_threads)){
+    struct list_elem *el=list_front(&cur->waiting_threads);
+    struct thread *th=list_entry(el, struct thread, wait_for_lock_elem);
+    if(th->priority>pr){
+      cur->priority=th->priority;
+      return;
+    }
+  }
+  cur->priority=pr;
+}
+
+void donate_priority(struct thread *th){
+  struct lock *lock=th->waiting_for_lock;
+  if(th->waiting_for_lock!=NULL){
+  struct thread *holder=lock->holder;
+    if(holder!=NULL && th->priority>holder->priority){
+      holder->priority=th->priority;
+      donate_priority(holder);
+    }
+  }
+}
+
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
