@@ -95,13 +95,13 @@ timer_sleep (int64_t ticks)
 {
   int64_t start = timer_ticks ();
 
-  struct thread *currentThread=thread_current();
-  currentThread->sleep_time = start+ticks;
+  struct thread *current_thread=thread_current();
+  current_thread->sleep_time = start+ticks;
 
   ASSERT (intr_get_level () == INTR_ON);
 
   enum intr_level old_level=intr_disable();
-  list_insert_ordered(&timer_blocked_list,&currentThread->sleep_elem,sleep_time_order,NULL);
+  list_insert_ordered(&timer_blocked_list,&current_thread->sleep_elem,sleep_time_order,NULL);
   thread_block();
   intr_set_level (old_level);
 }

@@ -42,6 +42,8 @@ void cond_wait (struct condition *, struct lock *);
 void cond_signal (struct condition *, struct lock *);
 void cond_broadcast (struct condition *, struct lock *);
 
+bool condition_priority_ordering(const struct list_elem* e1, const struct list_elem* e2);
+
 /* Optimization barrier.
 
    The compiler will not reorder operations across an
