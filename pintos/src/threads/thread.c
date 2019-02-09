@@ -668,21 +668,6 @@ bool priority_ordering(const struct list_elem *e1, const struct list_elem *e2, v
   }
 }
 
-void wakeup_sleeping_threads(struct list *timer_blocked_list){
-  int64_t ticks=timer_ticks();
-  while(!list_empty(timer_blocked_list)){
-    struct list_elem *el=list_front(timer_blocked_list);
-    struct thread *thr=list_entry(el,struct thread,sleep_elem);
-    int64_t sleep_time=thr->sleep_time;
-    if(sleep_time>ticks){
-      break;
-    }else{
-      list_pop_front(timer_blocked_list);
-      thread_unblock(thr);
-    }
-  }
-}
-
 void recalculate_priority(void){
   struct thread *cur=thread_current();
   int pr=cur->original_priority;
